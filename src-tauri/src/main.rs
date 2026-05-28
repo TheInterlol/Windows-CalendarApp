@@ -6,7 +6,7 @@ mod days;
 mod months;
 
 use days::TypesOfDay;
-use months::TypesOfMonth;
+use months::Month;
 
 /*pub fn write_out_current_day_and_month(day: u32, month: u32){
     println!("Dnes je {}. {}.",day, month);
@@ -22,11 +22,11 @@ pub fn get_current_date(){
 }*/
 
 fn main() {
-    let unor = months::TypesOfMonth::February;
+    let feb = months::Month::February;
 
-    let dny_v_unoru = unor.get_days_in_month(2024);
+    let days_in_feb = feb.get_days_in_month(2024);
 
-    println!("v únoru je: {} dnů", dny_v_unoru);
+    println!("v únoru je: {} dnů", days_in_feb);
 
     windows_calendarapp_lib::run();
 }

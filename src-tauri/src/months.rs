@@ -1,4 +1,4 @@
-pub enum TypesOfMonth {
+pub enum Month {
     January,
     February,
     March,
@@ -13,27 +13,27 @@ pub enum TypesOfMonth {
     December,
 }
 
-impl TypesOfMonth {
+impl Month {
     pub fn get_days_in_month(&self, year: i32) -> u8 {
         match self {
-            TypesOfMonth::January => 31,
-            TypesOfMonth::February => {
+            Month::January => 31,
+            Month::February => {
                 if year % 4 == 0 {
                     29
                 } else {
                     28
                 }
             }
-            TypesOfMonth::March => 31,
-            TypesOfMonth::April => 30,
-            TypesOfMonth::May => 31,
-            TypesOfMonth::June => 30,
-            TypesOfMonth::July => 31,
-            TypesOfMonth::August => 31,
-            TypesOfMonth::September => 30,
-            TypesOfMonth::October => 31,
-            TypesOfMonth::November => 30,
-            TypesOfMonth::December => 31,
+            Month::March => 31,
+            Month::April => 30,
+            Month::May => 31,
+            Month::June => 30,
+            Month::July => 31,
+            Month::August => 31,
+            Month::September => 30,
+            Month::October => 31,
+            Month::November => 30,
+            Month::December => 31,
         }
     }
 }
