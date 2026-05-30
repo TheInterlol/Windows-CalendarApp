@@ -1,4 +1,5 @@
 use std::fs;
+use tauri::Manager;
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
@@ -30,20 +31,45 @@ fn count_days(month_no: u32, year: i32) -> u8 {
 
     chosen_month.get_days_in_month(year)
 }
-
 #[tauri::command]
-fn load_event() -> String {
-    match fs::read_to_string("events.json") {
-        //Zkusí přečíst .json, jestli tam není tak pošle do Svelte prázdný objekt {}
-        Ok(content) => content,
-        Err(_) => "{}".to_string(),
+fn load_settings(app: tauri::AppHandle) -> String {
+    if let Ok(app_dir) = app.path().app_data_dir() {
+        let path = app_dir.join("settings.json");
+        if let Ok(content) = fs::read_to_string(path) {
+            return content;
+        }
     }
+    "{}".to_string()
+}
+#[tauri::command]
+fn save_settings(app: tauri::AppHandle, data: String) -> Result<(), String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
+    let path = app_dir.join("settings.json");
+    fs::write(path, data).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn save_event(data: String) -> Result<(), String> {
-    // Vezme text z .json a zapíše
-    fs::write("events.json", data).map_err(|e| e.to_string())
+fn load_event(app: tauri::AppHandle) -> String {
+    if let Ok(app_dir) = app.path().app_data_dir() {
+        let path = app_dir.join("events.json");
+        if let Ok(content) = fs::read_to_string(path) {
+            return content;
+        }
+    }
+    "{}".to_string()
+}
+
+#[tauri::command]
+fn save_event(app: tauri::AppHandle, data: String) -> Result<(), String> {
+    let app_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    fs::create_dir_all(&app_dir).map_err(|e| e.to_string())?;
+    let path = app_dir.join("events.json");
+    fs::write(path, data).map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn exit_app() {
+    std::process::exit(0);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -51,7 +77,13 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            greet, count_days, load_event, save_event
+            greet,
+            count_days,
+            load_settings,
+            save_settings,
+            load_event,
+            save_event,
+            exit_app
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
