@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
+  import { supabase } from "$lib/supabase";
 
   // --- TYPOVÉ DEFINICE ---
   interface SelectedDay {
@@ -8,21 +9,25 @@
     month: number;
     year: number;
   }
-
   interface AppSettings {
     language: "cs" | "en";
     clockStyle: "digital" | "minimal" | "analog";
     backgroundUrl: string;
     themeColor: "blue" | "red" | "gray" | "purple" | "green";
   }
-
   type SidebarView = "menu" | "settings" | "credits";
 
-  // --- REAKTIVNÍ STAV ---
+  // --- AUTHENTIKACE STAV ---
+  let session: any = null; // Zde bude uložen přihlášený uživatel
+  let authEmail = "";
+  let authPassword = "";
+  let isLoginMode = true; // Přepíná mezi "Přihlásit" a "Registrovat"
+  let authError = "";
+  let isAuthLoading = false;
+
+  // --- REAKTIVNÍ STAV APLIKACE ---
   let timeText: string = "";
   let dateText: string = "";
-
-  // Proměnné pro výpočet úhlů analogových ručiček
   let hourAngle: number = 0;
   let minuteAngle: number = 0;
   let secondAngle: number = 0;
@@ -32,7 +37,6 @@
   let currentYear: number = today.getFullYear();
   let isYearToggleActive: boolean = false;
 
-  // Výchozí čisté nastavení bez emotikonů
   let settings: AppSettings = {
     language: "cs",
     clockStyle: "digital",
@@ -41,10 +45,8 @@
     themeColor: "blue",
   };
 
-  // --- JAZYKOVÉ MUTACE (Lokalizace) ---
   const daysOfWeekCS = ["Po", "Út", "St", "Čt", "Pá", "So", "Ne"];
   const daysOfWeekEN = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
-
   const monthNamesCS = [
     "Leden",
     "Únor",
@@ -81,84 +83,146 @@
   let isMenuOpen: boolean = false;
   let currentSidebarView: SidebarView = "menu";
 
-  // --- RUST INTERFACES (Settings & Events) ---
+  // --- AUTH LOGIKA ---
+  async function handleAuth() {
+    isAuthLoading = true;
+    authError = "";
+
+    if (isLoginMode) {
+      const { error } = await supabase.auth.signInWithPassword({
+        email: authEmail,
+        password: authPassword,
+      });
+      if (error) authError = error.message;
+    } else {
+      const { error } = await supabase.auth.signUp({
+        email: authEmail,
+        password: authPassword,
+      });
+      if (error) authError = error.message;
+    }
+
+    isAuthLoading = false;
+  }
+
+  async function handleLogout() {
+    await supabase.auth.signOut();
+    events = {}; // Vyčistíme kalendář po odhlášení
+    isMenuOpen = false;
+  }
+
+  // --- CLOUD NAČÍTÁNÍ A UKLÁDÁNÍ PŘES SUPABASE ---
   async function loadSettings(): Promise<void> {
+    if (!session) return;
     try {
-      const data = await invoke<string>("load_settings");
-      const parsed = JSON.parse(data);
-      if (parsed.language) settings = { ...settings, ...parsed };
-    } catch (error) {
-      console.error("Nepodařilo se načíst nastavení:", error);
-    }
-  }
-  // --- KLÁVESOVÉ ZKRATKY ---
-  function handleKeydown(event: KeyboardEvent): void {
-    if (event.key === "Escape") {
-      if (selectedDay) {
-        // Pokud je otevřený modal s poznámkou, jen ho zavřeme
-        closeModal();
-      } else if (isMenuOpen) {
-        // Pokud je otevřené boční menu, zavřeme ho
-        isMenuOpen = false;
-        setTimeout(() => {
-          currentSidebarView = "menu";
-        }, 300);
-      } else {
-        // Pokud není nic otevřené, sestřelíme aplikaci
-        exitApp();
+      const { data, error } = await supabase
+        .from("user_settings")
+        .select("*")
+        .eq("user_id", session.user.id)
+        .maybeSingle();
+      if (data) {
+        settings.language = data.language || "cs";
+        settings.clockStyle = data.clock_style || "digital";
+        settings.themeColor = data.theme_color || "blue";
+        settings.backgroundUrl = data.background_url || settings.backgroundUrl;
       }
+    } catch (error) {
+      console.error(error);
     }
   }
+
   async function saveSettings(): Promise<void> {
+    if (!session) return;
     try {
-      await invoke("save_settings", { data: JSON.stringify(settings) });
+      await supabase.from("user_settings").upsert({
+        user_id: session.user.id,
+        language: settings.language,
+        clock_style: settings.clockStyle,
+        theme_color: settings.themeColor,
+        background_url: settings.backgroundUrl,
+      });
     } catch (error) {
-      console.error("Nepodařilo se uložit nastavení:", error);
+      console.error(error);
     }
   }
 
   async function loadEvents(): Promise<void> {
+    if (!session) return;
     try {
-      const data = await invoke<string>("load_event");
-      events = JSON.parse(data);
+      const { data, error } = await supabase
+        .from("events")
+        .select("date_key, event_text")
+        .eq("user_id", session.user.id);
+      if (data) {
+        const newEvents: Record<string, string> = {};
+        data.forEach((row) => {
+          newEvents[row.date_key] = row.event_text;
+        });
+        events = newEvents;
+      }
     } catch (error) {
-      console.error("Nepodařilo se načíst události:", error);
+      console.error(error);
     }
   }
 
   async function saveEvent(): Promise<void> {
-    if (!selectedDay) return;
+    if (!selectedDay || !session) return;
     const key = `${selectedDay.year}-${selectedDay.month}-${selectedDay.day}`;
-    if (eventText.trim() === "") {
-      delete events[key];
-    } else {
-      events[key] = eventText;
-    }
+
+    if (eventText.trim() === "") delete events[key];
+    else events[key] = eventText;
     events = { ...events };
 
     try {
-      await invoke("save_event", { data: JSON.stringify(events) });
+      await supabase
+        .from("events")
+        .delete()
+        .eq("date_key", key)
+        .eq("user_id", session.user.id);
+      if (eventText.trim() !== "") {
+        await supabase.from("events").insert({
+          user_id: session.user.id,
+          date_key: key,
+          event_text: eventText,
+        });
+      }
     } catch (error) {
-      console.error("Nepovedlo se uložit data:", error);
+      console.error(error);
     }
     closeModal();
   }
 
   async function deleteEvent(): Promise<void> {
-    if (!selectedDay) return;
+    if (!selectedDay || !session) return;
     const key = `${selectedDay.year}-${selectedDay.month}-${selectedDay.day}`;
     delete events[key];
     events = { ...events };
 
     try {
-      await invoke("save_event", { data: JSON.stringify(events) });
+      await supabase
+        .from("events")
+        .delete()
+        .eq("date_key", key)
+        .eq("user_id", session.user.id);
     } catch (error) {
-      console.error("Nepovedlo se smazat data:", error);
+      console.error(error);
     }
     closeModal();
   }
 
-  // --- LOGIKA OVLÁDÁNÍ ---
+  // --- LOGIKA KALENDÁŘE A OVLÁDÁNÍ ---
+  function handleKeydown(event: KeyboardEvent): void {
+    if (event.key === "Escape") {
+      if (selectedDay) closeModal();
+      else if (isMenuOpen) {
+        isMenuOpen = false;
+        setTimeout(() => {
+          currentSidebarView = "menu";
+        }, 300);
+      } else exitApp();
+    }
+  }
+
   function handleDayClick(day: number | null): void {
     if (!day) return;
     selectedDay = { day, month: currentMonth, year: currentYear };
@@ -169,16 +233,13 @@
   function closeModal(): void {
     selectedDay = null;
   }
-
   function toggleMenu(): void {
     isMenuOpen = !isMenuOpen;
-    if (!isMenuOpen) {
+    if (!isMenuOpen)
       setTimeout(() => {
         currentSidebarView = "menu";
       }, 300);
-    }
   }
-
   async function exitApp(): Promise<void> {
     await invoke("exit_app");
   }
@@ -204,9 +265,8 @@
   }
 
   function goPrevious(): void {
-    if (isYearToggleActive) {
-      currentYear--;
-    } else {
+    if (isYearToggleActive) currentYear--;
+    else {
       currentMonth--;
       if (currentMonth < 0) {
         currentMonth = 11;
@@ -217,9 +277,8 @@
   }
 
   function goNext(): void {
-    if (isYearToggleActive) {
-      currentYear++;
-    } else {
+    if (isYearToggleActive) currentYear++;
+    else {
       currentMonth++;
       if (currentMonth > 11) {
         currentMonth = 0;
@@ -233,26 +292,22 @@
     const now = new Date();
     const currentLang = settings.language === "cs" ? "cs-CZ" : "en-US";
 
-    // Formátování textového času
-    if (settings.clockStyle === "minimal") {
+    if (settings.clockStyle === "minimal")
       timeText = now.toLocaleTimeString(currentLang, {
         hour: "2-digit",
         minute: "2-digit",
       });
-    } else {
+    else
       timeText = now.toLocaleTimeString(currentLang, {
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
       });
-    }
-
     dateText = now.toLocaleDateString(currentLang, {
       day: "numeric",
       month: "long",
     });
 
-    // Výpočet úhlů pro analogový ciferník
     const hrs = now.getHours();
     const mins = now.getMinutes();
     const secs = now.getSeconds();
@@ -261,282 +316,373 @@
     secondAngle = secs * 6;
   }
 
-  onMount(async () => {
-    await loadSettings(); // Prvně načteme nastavení z disku
+  onMount(() => {
+    // 1. Zjistíme, jestli už je někdo přihlášený z minula
+    supabase.auth.getSession().then(({ data }) => {
+      session = data.session;
+      if (session) {
+        loadSettings();
+        loadEvents();
+      }
+    });
+
+    // 2. Nasloucháme změnám (přihlášení/odhlášení)
+    supabase.auth.onAuthStateChange((_event, _session) => {
+      session = _session;
+      if (session) {
+        loadSettings();
+        loadEvents();
+      }
+    });
+
     updateTime();
     calculateCalendar();
-    loadEvents();
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
   });
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
+
 <main
   class="app-container palette-{settings.themeColor}"
   style="background-image: url('{settings.backgroundUrl}')"
   data-tauri-drag-region
 >
-  <button class="settings-btn" on:click={toggleMenu} aria-label="Nastavení">
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      stroke-width="2"
-      stroke-linecap="round"
-      stroke-linejoin="round"
-    >
-      <circle cx="12" cy="12" r="3"></circle>
-      <path
-        d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
-      ></path>
-    </svg>
-  </button>
+  {#if !session}
+    <div class="auth-overlay" data-tauri-drag-region>
+      <div class="auth-box" data-tauri-drag-region>
+        <h2>{isLoginMode ? "Přihlášení" : "Registrace"}</h2>
+        <p class="subtitle">Cloud Calendar Sync</p>
 
-  <aside class="sidebar" class:open={isMenuOpen}>
-    <div class="sidebar-content">
-      {#if currentSidebarView === "menu"}
-        <h2>{settings.language === "cs" ? "Menu" : "Menu"}</h2>
-        <ul class="menu-items">
-          <li>
-            <button on:click={() => (currentSidebarView = "settings")}
-              >{settings.language === "cs" ? "Nastavení" : "Settings"}</button
-            >
-          </li>
-          <li>
-            <button on:click={() => (currentSidebarView = "credits")}
-              >{settings.language === "cs" ? "Credits" : "Credits"}</button
-            >
-          </li>
-        </ul>
-      {:else if currentSidebarView === "settings"}
-        <div class="sidebar-header">
-          <button
-            class="back-btn"
-            on:click={() => (currentSidebarView = "menu")}>&#8592;</button
+        {#if authError}
+          <div class="error-msg">{authError}</div>
+        {/if}
+
+        <div class="input-group">
+          <label for="email">E-mail</label>
+          <input
+            id="email"
+            type="email"
+            bind:value={authEmail}
+            placeholder="tvuj@email.cz"
+          />
+        </div>
+
+        <div class="input-group">
+          <label for="password">Heslo</label>
+          <input
+            id="password"
+            type="password"
+            bind:value={authPassword}
+            placeholder="••••••••"
+          />
+        </div>
+
+        <button
+          class="btn-primary"
+          on:click={handleAuth}
+          disabled={isAuthLoading}
+        >
+          {isAuthLoading
+            ? "Načítám..."
+            : isLoginMode
+              ? "Vstoupit"
+              : "Vytvořit účet"}
+        </button>
+
+        <p class="toggle-auth">
+          {isLoginMode ? "Nemáš účet?" : "Už máš účet?"}
+          <span
+            on:click={() => {
+              isLoginMode = !isLoginMode;
+              authError = "";
+            }}
           >
-          <h2>{settings.language === "cs" ? "Nastavení" : "Settings"}</h2>
-        </div>
+            {isLoginMode ? "Zaregistruj se" : "Přihlas se"}
+          </span>
+        </p>
 
-        <div class="sidebar-body">
-          <div class="settings-group">
-            <label for="langSelect"
-              >{settings.language === "cs" ? "Jazyk" : "Language"}</label
-            >
-            <select
-              id="langSelect"
-              bind:value={settings.language}
-              on:change={saveSettings}
-            >
-              <option value="cs">Čeština</option>
-              <option value="en">English</option>
-            </select>
-          </div>
-
-          <div class="settings-group">
-            <label for="clockSelect"
-              >{settings.language === "cs"
-                ? "Styl hodin"
-                : "Clock Style"}</label
-            >
-            <select
-              id="clockSelect"
-              bind:value={settings.clockStyle}
-              on:change={saveSettings}
-            >
-              <option value="digital">Digital (Full)</option>
-              <option value="minimal">Minimal (No Sec)</option>
-              <option value="analog">Analog</option>
-            </select>
-          </div>
-
-          <div class="settings-group">
-            <label for="colorSelect"
-              >{settings.language === "cs"
-                ? "Barevná paleta"
-                : "Color Palette"}</label
-            >
-            <select
-              id="colorSelect"
-              bind:value={settings.themeColor}
-              on:change={saveSettings}
-            >
-              <option value="blue">Windows Blue</option>
-              <option value="red">Cyberpunk Red</option>
-              <option value="gray">Minimal Gray</option>
-              <option value="purple">Vibrant Purple</option>
-              <option value="green">Forest Green</option>
-            </select>
-          </div>
-
-          <div class="settings-group">
-            <label for="bgInput"
-              >{settings.language === "cs"
-                ? "URL obrázku pozadí"
-                : "Background Image URL"}</label
-            >
-            <input
-              id="bgInput"
-              type="text"
-              bind:value={settings.backgroundUrl}
-              on:change={saveSettings}
-              placeholder="https://..."
-            />
-          </div>
-        </div>
-      {:else if currentSidebarView === "credits"}
-        <div class="sidebar-header">
-          <button
-            class="back-btn"
-            on:click={() => (currentSidebarView = "menu")}>&#8592;</button
-          >
-          <h2>Credits</h2>
-        </div>
-        <div class="sidebar-body credits-text">
-          <p>Rust coded by me</p>
-          <p>Design written by Gemini</p>
-          <p>i wont be bothered by typing html and css</p>
-          <p style="font-style: italic;">- Bagr Křehňák 2026</p>
-        </div>
-      {/if}
+        <button class="btn-exit-small" on:click={exitApp}
+          >Zavřít aplikaci</button
+        >
+      </div>
     </div>
-
-    <button class="btn-exit-app" on:click={exitApp}>
+  {:else}
+    <button class="settings-btn" on:click={toggleMenu} aria-label="Nastavení">
       <svg
         viewBox="0 0 24 24"
-        width="18"
-        height="18"
+        fill="none"
         stroke="currentColor"
         stroke-width="2"
-        fill="none"
         stroke-linecap="round"
         stroke-linejoin="round"
       >
-        <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
-        <polyline points="16 17 21 12 16 7"></polyline>
-        <line x1="21" y1="12" x2="9" y2="12"></line>
+        <circle cx="12" cy="12" r="3"></circle>
+        <path
+          d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
+        ></path>
       </svg>
-      {settings.language === "cs" ? "Ukončit aplikaci" : "Exit Application"}
     </button>
-  </aside>
 
-  <div
-    class="sidebar-overlay"
-    class:visible={isMenuOpen}
-    on:click={toggleMenu}
-  ></div>
-
-  <div class="main-widget" data-tauri-drag-region>
-    <div class="widget-layout" data-tauri-drag-region>
-      <div class="calendar-header" data-tauri-drag-region>
-        <button class="nav-btn" on:click={goPrevious}>&#8592;</button>
-        <div class="title-toggle">
-          <span
-            class="month-part"
-            class:active={!isYearToggleActive}
-            on:click={() => (isYearToggleActive = false)}
-          >
-            {settings.language === "cs"
-              ? monthNamesCS[currentMonth]
-              : monthNamesEN[currentMonth]}
-          </span>
-          <span
-            class="year-part"
-            class:active={isYearToggleActive}
-            on:click={() => (isYearToggleActive = true)}
-          >
-            {currentYear}
-          </span>
-        </div>
-        <button class="nav-btn" on:click={goNext}>&#8594;</button>
-      </div>
-
-      <div class="status-clock" data-tauri-drag-region>
-        {#if settings.clockStyle === "analog"}
-          <div class="analog-clock-face">
-            <div
-              class="hand hour-hand"
-              style="transform: rotate({hourAngle}deg)"
-            ></div>
-            <div
-              class="hand minute-hand"
-              style="transform: rotate({minuteAngle}deg)"
-            ></div>
-            <div
-              class="hand second-hand"
-              style="transform: rotate({secondAngle}deg)"
-            ></div>
-            <div class="center-pin"></div>
+    <aside class="sidebar" class:open={isMenuOpen}>
+      <div class="sidebar-content">
+        {#if currentSidebarView === "menu"}
+          <h2>{settings.language === "cs" ? "Menu" : "Menu"}</h2>
+          <ul class="menu-items">
+            <li>
+              <button on:click={() => (currentSidebarView = "settings")}
+                >{settings.language === "cs" ? "Nastavení" : "Settings"}</button
+              >
+            </li>
+            <li>
+              <button on:click={() => (currentSidebarView = "credits")}
+                >{settings.language === "cs" ? "Credits" : "Credits"}</button
+              >
+            </li>
+          </ul>
+        {:else if currentSidebarView === "settings"}
+          <div class="sidebar-header">
+            <button
+              class="back-btn"
+              on:click={() => (currentSidebarView = "menu")}>&#8592;</button
+            >
+            <h2>{settings.language === "cs" ? "Nastavení" : "Settings"}</h2>
           </div>
-          <span class="date-small">{dateText}</span>
-        {:else}
-          <span class="time">{timeText}</span>
-          <span class="date-small">{dateText}</span>
+          <div class="sidebar-body">
+            <div class="settings-group">
+              <label for="langSelect"
+                >{settings.language === "cs" ? "Jazyk" : "Language"}</label
+              >
+              <select
+                id="langSelect"
+                bind:value={settings.language}
+                on:change={saveSettings}
+              >
+                <option value="cs">Čeština</option>
+                <option value="en">English</option>
+              </select>
+            </div>
+            <div class="settings-group">
+              <label for="clockSelect"
+                >{settings.language === "cs"
+                  ? "Styl hodin"
+                  : "Clock Style"}</label
+              >
+              <select
+                id="clockSelect"
+                bind:value={settings.clockStyle}
+                on:change={saveSettings}
+              >
+                <option value="digital">Digital (Full)</option>
+                <option value="minimal">Minimal (No Sec)</option>
+                <option value="analog">Analog</option>
+              </select>
+            </div>
+            <div class="settings-group">
+              <label for="colorSelect"
+                >{settings.language === "cs"
+                  ? "Barevná paleta"
+                  : "Color Palette"}</label
+              >
+              <select
+                id="colorSelect"
+                bind:value={settings.themeColor}
+                on:change={saveSettings}
+              >
+                <option value="blue">Windows Blue</option>
+                <option value="red">Cyberpunk Red</option>
+                <option value="gray">Minimal Gray</option>
+                <option value="purple">Vibrant Purple</option>
+                <option value="green">Forest Green</option>
+              </select>
+            </div>
+            <div class="settings-group">
+              <label for="bgInput"
+                >{settings.language === "cs"
+                  ? "URL obrázku pozadí"
+                  : "Background Image URL"}</label
+              >
+              <input
+                id="bgInput"
+                type="text"
+                bind:value={settings.backgroundUrl}
+                on:change={saveSettings}
+                placeholder="https://..."
+              />
+            </div>
+          </div>
+        {:else if currentSidebarView === "credits"}
+          <div class="sidebar-header">
+            <button
+              class="back-btn"
+              on:click={() => (currentSidebarView = "menu")}>&#8592;</button
+            >
+            <h2>Credits</h2>
+          </div>
+          <div class="sidebar-body credits-text">
+            <p>Rust coded by me</p>
+            <p>Design written by Gemini</p>
+            <p>i wont be bothered by typing html and css</p>
+            <p style="font-style: italic;">- Bagr Křehňák 2026</p>
+          </div>
         {/if}
       </div>
 
-      <div class="calendar-grid" data-tauri-drag-region>
-        {#each settings.language === "cs" ? daysOfWeekCS : daysOfWeekEN as dayName}
-          <div class="weekday-label">{dayName}</div>
-        {/each}
-
-        {#each daysInMonth as day}
-          {@const key = day ? `${currentYear}-${currentMonth}-${day}` : ""}
-          <div
-            class="day-cell"
-            class:today={day === today.getDate() &&
-              currentMonth === today.getMonth() &&
-              currentYear === today.getFullYear()}
-            on:click={() => handleDayClick(day)}
+      <div class="bottom-actions">
+        <button class="btn-logout" on:click={handleLogout}>
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            stroke="currentColor"
+            stroke-width="2"
+            fill="none"
+            stroke-linecap="round"
+            stroke-linejoin="round"
           >
-            {day || ""}
-            {#if day && events[key]}
-              <div class="event-dot"></div>
-            {/if}
-          </div>
-        {/each}
+            <path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"></path><polyline
+              points="10 17 15 12 10 7"
+            ></polyline><line x1="15" y1="12" x2="3" y2="12"></line>
+          </svg>
+          {settings.language === "cs" ? "Odhlásit se" : "Sign Out"}
+        </button>
+
+        <button class="btn-exit-app" on:click={exitApp}>
+          <svg
+            viewBox="0 0 24 24"
+            width="18"
+            height="18"
+            stroke="currentColor"
+            stroke-width="2"
+            fill="none"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline
+              points="16 17 21 12 16 7"
+            ></polyline><line x1="21" y1="12" x2="9" y2="12"></line>
+          </svg>
+          {settings.language === "cs" ? "Ukončit aplikaci" : "Exit Application"}
+        </button>
       </div>
-    </div>
+    </aside>
 
-    {#if selectedDay}
-      <div class="modal-overlay" on:click={closeModal}>
-        <div class="modal-content" on:click|stopPropagation>
-          <h3>
-            {settings.language === "cs" ? "Poznámka" : "Note"}:
-            {selectedDay.day}. {settings.language === "cs"
-              ? monthNamesCS[selectedDay.month]
-              : monthNamesEN[selectedDay.month]}
-            {selectedDay.year}
-          </h3>
+    <div
+      class="sidebar-overlay"
+      class:visible={isMenuOpen}
+      on:click={toggleMenu}
+    ></div>
 
-          <textarea
-            bind:value={eventText}
-            placeholder={settings.language === "cs"
-              ? "Sem zapiš svou událost..."
-              : "Type your event here..."}
-          ></textarea>
-
-          <div class="modal-actions">
-            {#if events[`${selectedDay.year}-${selectedDay.month}-${selectedDay.day}`]}
-              <button class="btn-delete" on:click={deleteEvent}
-                >{settings.language === "cs" ? "Vymazat" : "Delete"}</button
-              >
-            {/if}
-            <button class="btn-cancel" on:click={closeModal}
-              >{settings.language === "cs" ? "Zrušit" : "Cancel"}</button
+    <div class="main-widget" data-tauri-drag-region>
+      <div class="widget-layout" data-tauri-drag-region>
+        <div class="calendar-header" data-tauri-drag-region>
+          <button class="nav-btn" on:click={goPrevious}>&#8592;</button>
+          <div class="title-toggle">
+            <span
+              class="month-part"
+              class:active={!isYearToggleActive}
+              on:click={() => (isYearToggleActive = false)}
             >
-            <button class="btn-save" on:click={saveEvent}
-              >{settings.language === "cs" ? "Uložit" : "Save"}</button
+              {settings.language === "cs"
+                ? monthNamesCS[currentMonth]
+                : monthNamesEN[currentMonth]}
+            </span>
+            <span
+              class="year-part"
+              class:active={isYearToggleActive}
+              on:click={() => (isYearToggleActive = true)}
             >
+              {currentYear}
+            </span>
           </div>
+          <button class="nav-btn" on:click={goNext}>&#8594;</button>
+        </div>
+
+        <div class="status-clock" data-tauri-drag-region>
+          {#if settings.clockStyle === "analog"}
+            <div class="analog-clock-face">
+              <div
+                class="hand hour-hand"
+                style="transform: rotate({hourAngle}deg)"
+              ></div>
+              <div
+                class="hand minute-hand"
+                style="transform: rotate({minuteAngle}deg)"
+              ></div>
+              <div
+                class="hand second-hand"
+                style="transform: rotate({secondAngle}deg)"
+              ></div>
+              <div class="center-pin"></div>
+            </div>
+            <span class="date-small">{dateText}</span>
+          {:else}
+            <span class="time">{timeText}</span>
+            <span class="date-small">{dateText}</span>
+          {/if}
+        </div>
+
+        <div class="calendar-grid" data-tauri-drag-region>
+          {#each settings.language === "cs" ? daysOfWeekCS : daysOfWeekEN as dayName}
+            <div class="weekday-label">{dayName}</div>
+          {/each}
+
+          {#each daysInMonth as day}
+            {@const key = day ? `${currentYear}-${currentMonth}-${day}` : ""}
+            <div
+              class="day-cell"
+              class:today={day === today.getDate() &&
+                currentMonth === today.getMonth() &&
+                currentYear === today.getFullYear()}
+              on:click={() => handleDayClick(day)}
+            >
+              {day || ""}
+              {#if day && events[key]}
+                <div class="event-dot"></div>
+              {/if}
+            </div>
+          {/each}
         </div>
       </div>
-    {/if}
-  </div>
+
+      {#if selectedDay}
+        <div class="modal-overlay" on:click={closeModal}>
+          <div class="modal-content" on:click|stopPropagation>
+            <h3>
+              {settings.language === "cs" ? "Poznámka" : "Note"}: {selectedDay.day}.
+              {settings.language === "cs"
+                ? monthNamesCS[selectedDay.month]
+                : monthNamesEN[selectedDay.month]}
+              {selectedDay.year}
+            </h3>
+            <textarea
+              bind:value={eventText}
+              placeholder={settings.language === "cs"
+                ? "Sem zapiš svou událost..."
+                : "Type your event here..."}
+            ></textarea>
+            <div class="modal-actions">
+              {#if events[`${selectedDay.year}-${selectedDay.month}-${selectedDay.day}`]}
+                <button class="btn-delete" on:click={deleteEvent}
+                  >{settings.language === "cs" ? "Vymazat" : "Delete"}</button
+                >
+              {/if}
+              <button class="btn-cancel" on:click={closeModal}
+                >{settings.language === "cs" ? "Zrušit" : "Cancel"}</button
+              >
+              <button class="btn-save" on:click={saveEvent}
+                >{settings.language === "cs" ? "Uložit" : "Save"}</button
+              >
+            </div>
+          </div>
+        </div>
+      {/if}
+    </div>
+  {/if}
 </main>
 
 <style>
-  /* --- AKCENTNÍ PALETY POMOCÍ CSS PROMĚNNÝCH --- */
   .palette-blue {
     --accent-color: #0078d4;
     --accent-glow: rgba(0, 120, 212, 0.5);
@@ -566,7 +712,6 @@
     font-family: "Segoe UI Variable Display", "Segoe UI", sans-serif;
     overflow: hidden;
   }
-
   .app-container {
     height: 100vh;
     display: flex;
@@ -579,7 +724,6 @@
     border-radius: 12px;
     -webkit-app-region: drag;
   }
-
   button,
   select,
   input,
@@ -587,11 +731,138 @@
   .title-toggle,
   .sidebar,
   .modal-overlay,
-  .event-dot {
+  .event-dot,
+  .auth-box {
     -webkit-app-region: no-drag;
   }
 
-  /* --- CISTÉ IKONY NASTAVENÍ --- */
+  /* --- AUTH STYLY --- */
+  .auth-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.6);
+    backdrop-filter: blur(15px);
+  }
+  .auth-box {
+    background: rgba(30, 30, 30, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    padding: 40px;
+    border-radius: 20px;
+    width: 350px;
+    text-align: center;
+    box-shadow: 0 20px 40px rgba(0, 0, 0, 0.5);
+  }
+  .auth-box h2 {
+    margin: 0;
+    color: white;
+    font-size: 2rem;
+    font-weight: 500;
+  }
+  .subtitle {
+    color: var(--accent-color);
+    margin-top: 5px;
+    margin-bottom: 25px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    font-size: 0.85rem;
+  }
+
+  .error-msg {
+    background: rgba(220, 53, 69, 0.2);
+    color: #ff6b6b;
+    padding: 10px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    font-size: 0.9rem;
+    border: 1px solid rgba(220, 53, 69, 0.3);
+  }
+
+  .input-group {
+    text-align: left;
+    margin-bottom: 15px;
+  }
+  .input-group label {
+    display: block;
+    font-size: 0.85rem;
+    opacity: 0.7;
+    margin-bottom: 5px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .input-group input {
+    width: 100%;
+    box-sizing: border-box;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: white;
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 1rem;
+    transition: 0.2s;
+  }
+  .input-group input:focus {
+    outline: none;
+    border-color: var(--accent-color);
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .btn-primary {
+    width: 100%;
+    background: var(--accent-color);
+    color: white;
+    border: none;
+    padding: 12px;
+    border-radius: 8px;
+    font-size: 1.1rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 10px;
+    transition: 0.2s;
+  }
+  .btn-primary:hover {
+    filter: brightness(1.2);
+  }
+  .btn-primary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+
+  .toggle-auth {
+    margin-top: 20px;
+    font-size: 0.9rem;
+    opacity: 0.8;
+  }
+  .toggle-auth span {
+    color: var(--accent-color);
+    cursor: pointer;
+    font-weight: bold;
+    margin-left: 5px;
+  }
+  .toggle-auth span:hover {
+    text-decoration: underline;
+  }
+
+  .btn-exit-small {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.4);
+    margin-top: 25px;
+    cursor: pointer;
+    transition: 0.2s;
+    font-size: 0.85rem;
+  }
+  .btn-exit-small:hover {
+    color: #ff6b6b;
+  }
+
+  /* --- ZBYTEK APLIKACE --- */
   .settings-btn {
     position: absolute;
     top: 20px;
@@ -619,7 +890,6 @@
     height: 20px;
   }
 
-  /* --- SIDEBAR BEZ EMOTIKONŮ --- */
   .sidebar {
     position: absolute;
     top: 0;
@@ -641,7 +911,6 @@
   .sidebar.open {
     transform: translateX(0);
   }
-
   .sidebar-overlay {
     position: absolute;
     top: 0;
@@ -658,7 +927,6 @@
     opacity: 1;
     pointer-events: auto;
   }
-
   .sidebar h2 {
     margin: 0 0 20px 0;
     font-size: 1.5rem;
@@ -674,7 +942,6 @@
   .sidebar-header h2 {
     margin: 0;
   }
-
   .back-btn {
     background: transparent;
     border: none;
@@ -690,7 +957,6 @@
   .back-btn:hover {
     transform: translateX(-4px);
   }
-
   .sidebar-body {
     color: rgba(255, 255, 255, 0.8);
     font-size: 0.95rem;
@@ -701,7 +967,6 @@
     font-style: italic;
   }
 
-  /* SLEEK MINIMAL INPUTS FOR SETTINGS */
   .settings-group {
     margin-bottom: 18px;
     display: flex;
@@ -715,7 +980,6 @@
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
-
   .settings-group select,
   .settings-group input {
     background: rgba(255, 255, 255, 0.05);
@@ -761,6 +1025,30 @@
     color: var(--accent-color);
   }
 
+  .bottom-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .btn-logout {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: white;
+    font-size: 1rem;
+    padding: 12px 15px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: 0.2s;
+  }
+  .btn-logout:hover {
+    background: rgba(255, 255, 255, 0.15);
+  }
+
   .btn-exit-app {
     display: flex;
     align-items: center;
@@ -780,7 +1068,6 @@
     color: white;
   }
 
-  /* --- CISTÝ TITULNÍ PANAL --- */
   .main-widget {
     position: relative;
     background: rgba(30, 30, 30, 0.6);
@@ -793,7 +1080,6 @@
     box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5);
     box-sizing: border-box;
   }
-
   .widget-layout {
     display: grid;
     grid-template-columns: 1fr auto;
@@ -823,7 +1109,6 @@
   .title-toggle span:hover {
     filter: brightness(1.3);
   }
-
   .month-part {
     font-size: 2.6rem;
     font-weight: 500;
@@ -843,7 +1128,6 @@
     opacity: 1;
     font-weight: 500;
   }
-
   .nav-btn {
     background: rgba(255, 255, 255, 0.05);
     border: 1px solid rgba(255, 255, 255, 0.1);
@@ -890,7 +1174,6 @@
     margin-top: 4px;
   }
 
-  /* --- MINIMALISTICKÉ ANALOGOVÉ HODINY --- */
   .analog-clock-face {
     position: relative;
     width: 65px;
@@ -937,7 +1220,6 @@
     margin-left: -3px;
   }
 
-  /* --- MŘÍŽKA KALENDÁŘE --- */
   .calendar-grid {
     grid-column: span 2;
     display: grid;
@@ -953,7 +1235,6 @@
     padding-bottom: 5px;
     text-transform: uppercase;
   }
-
   .day-cell {
     position: relative;
     width: 46px;
@@ -978,7 +1259,6 @@
     color: white;
     box-shadow: 0 0 20px var(--accent-glow);
   }
-
   .event-dot {
     position: absolute;
     bottom: 5px;
@@ -992,7 +1272,6 @@
     background: rgba(255, 255, 255, 0.9);
   }
 
-  /* --- MODAL --- */
   .modal-overlay {
     position: absolute;
     top: 0;
@@ -1026,7 +1305,6 @@
       transform: scale(1);
     }
   }
-
   .modal-content h3 {
     margin: 0 0 15px 0;
     font-weight: 500;
@@ -1063,7 +1341,6 @@
     font-weight: 500;
     transition: 0.2s;
   }
-
   .btn-delete {
     margin-right: auto;
     background: rgba(220, 53, 69, 0.15);
