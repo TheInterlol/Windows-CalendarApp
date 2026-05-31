@@ -8,19 +8,6 @@ mod months;
 use days::TypesOfDay;
 use months::Month;
 
-/*pub fn write_out_current_day_and_month(day: u32, month: u32){
-    println!("Dnes je {}. {}.",day, month);
-}
-
-pub fn get_current_date(){
-    //pro aktualni čas
-    let time = Local::now();
-    let month_number = time.month();
-    let day_number = time.weekday().number_from_monday();
-
-    write_out_current_day_and_month(day_number, month_number);
-}*/
-
 fn main() {
     let feb = months::Month::February;
 

@@ -18,10 +18,10 @@
   type SidebarView = "menu" | "settings" | "credits";
 
   // --- AUTHENTIKACE STAV ---
-  let session: any = null; // Zde bude uložen přihlášený uživatel
+  let session: any = null;
   let authEmail = "";
   let authPassword = "";
-  let isLoginMode = true; // Přepíná mezi "Přihlásit" a "Registrovat"
+  let isLoginMode = true;
   let authError = "";
   let isAuthLoading = false;
 
@@ -107,7 +107,7 @@
 
   async function handleLogout() {
     await supabase.auth.signOut();
-    events = {}; // Vyčistíme kalendář po odhlášení
+    events = {};
     isMenuOpen = false;
   }
 
@@ -317,7 +317,6 @@
   }
 
   onMount(() => {
-    // 1. Zjistíme, jestli už je někdo přihlášený z minula
     supabase.auth.getSession().then(({ data }) => {
       session = data.session;
       if (session) {
@@ -326,7 +325,6 @@
       }
     });
 
-    // 2. Nasloucháme změnám (přihlášení/odhlášení)
     supabase.auth.onAuthStateChange((_event, _session) => {
       session = _session;
       if (session) {
@@ -683,6 +681,7 @@
 </main>
 
 <style>
+  /* --- AKCENTNÍ PALETY POMOCÍ CSS PROMĚNNÝCH --- */
   .palette-blue {
     --accent-color: #0078d4;
     --accent-glow: rgba(0, 120, 212, 0.5);
@@ -748,6 +747,7 @@
     align-items: center;
     background: rgba(0, 0, 0, 0.6);
     backdrop-filter: blur(15px);
+    z-index: 100;
   }
   .auth-box {
     background: rgba(30, 30, 30, 0.7);
@@ -901,7 +901,7 @@
     border-right: 1px solid rgba(255, 255, 255, 0.1);
     transform: translateX(-100%);
     transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-    z-index: 40;
+    z-index: 60;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
@@ -921,7 +921,7 @@
     opacity: 0;
     pointer-events: none;
     transition: opacity 0.3s ease;
-    z-index: 35;
+    z-index: 55;
   }
   .sidebar-overlay.visible {
     opacity: 1;
@@ -1068,6 +1068,7 @@
     color: white;
   }
 
+  /* TŘÍDA PRO RESPONZIVITU (Desktop verze) */
   .main-widget {
     position: relative;
     background: rgba(30, 30, 30, 0.6);
@@ -1075,11 +1076,13 @@
     -webkit-backdrop-filter: blur(25px);
     border: 1px solid rgba(255, 255, 255, 0.1);
     border-radius: 24px;
-    padding: 40px;
-    width: 700px;
+    padding: 25px;
+    width: 90%;
+    max-width: 700px;
     box-shadow: 0 30px 60px rgba(0, 0, 0, 0.5);
     box-sizing: border-box;
   }
+
   .widget-layout {
     display: grid;
     grid-template-columns: 1fr auto;
@@ -1363,5 +1366,80 @@
   }
   .btn-save:hover {
     filter: brightness(1.2);
+  }
+
+  /* --- ZDE JSOU NOVÁ RESPONZIVNÍ PRAVIDLA PRO MOBILY --- */
+  @media (max-width: 600px) {
+    .main-widget {
+      width: 95%;
+      min-height: 80vh; /* Zázračné pravidlo: Roztáhne to na 80% výšky displeje! */
+      padding: 35px 20px;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .widget-layout {
+      display: flex;
+      flex-direction: column;
+      flex: 1; /* Dovolí vnitřku vyplnit celou tu novou výšku */
+      justify-content: space-between; /* Rozdělí volný prostor rovnoměrně */
+      gap: 20px;
+    }
+
+    .calendar-header {
+      padding-right: 0;
+      justify-content: space-between;
+      width: 100%;
+    }
+
+    .title-toggle {
+      width: auto;
+    }
+
+    .month-part {
+      font-size: 2.3rem;
+    }
+    .year-part {
+      font-size: 2.1rem;
+    }
+
+    .status-clock {
+      width: 100%;
+      padding: 25px 15px; /* Tlustší bublina pro hodiny */
+      box-sizing: border-box;
+    }
+
+    .time {
+      font-size: 3.2rem;
+    } /* Obrovský čas */
+    .date-small {
+      font-size: 1.1rem;
+    }
+
+    .calendar-grid {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 8px; /* Větší mezery mezi dny */
+      width: 100%;
+      margin-top: 10px;
+    }
+
+    .day-cell {
+      width: 100%;
+      height: auto;
+      aspect-ratio: 1 / 1.15; /* Lehce obdélníkové = mnohem snazší na trefení */
+      border-radius: 14px; /* Místo kruhu moderní zaoblené rohy */
+      font-size: 1.3rem; /* Větší čísla */
+    }
+
+    .weekday-label {
+      font-size: 0.95rem;
+      margin-bottom: 12px;
+    }
+
+    .auth-box {
+      width: 95%;
+      padding: 35px 20px;
+    }
   }
 </style>
