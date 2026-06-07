@@ -1,4 +1,3 @@
-````markdown
 # Chroniq 📅
 
 A lightning-fast and minimalist calendar designed for maximum focus and absolute privacy protection. No complicated settings or unnecessary features to distract you—just a clean design and a perfect overview of your time.
@@ -42,7 +41,7 @@ Clone the repository and install dependencies:
 
 ```bash
 npm install
-````
+```
 
 ### Development
 
@@ -58,7 +57,4 @@ To build the final optimized application (APK/AAB for Android):
 
 ```bash
 npm run tauri build
-```
-
-```
 ```
